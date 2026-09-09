@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.bass57.sound-on-plug",
+  "name": "Sound on Plug",
+  "version": "1.0.0",
+  "author": "Bass57",
+  "license": "MIT",
+  "description": "Play a chill chime and track USB-storage presence when a drive is plugged in, unmounted, or unplugged. Fully user-space (udevadm monitor + UDisks2 via gdbus) — no root, no udev rules.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "activation": "on-demand",
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Sound on Plug",
+    "description": "Bar icon that is visible while any USB storage device is connected. Left click previews the plug sound, right the unplug sound, middle the unmount sound. Full plug / unmount / unplug monitoring requires the companion hook and systemd user service — run ./install.sh after cloning (see README).",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "left"
+  }
+}
