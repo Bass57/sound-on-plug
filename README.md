@@ -1,16 +1,16 @@
 # 🔌 Sound on Plug
 
-Chill chimes and a status-bar indicator for **USB storage** plug, unmount, and
-unplug events on Omarchy (Wayland / Hyprland / Quickshell).
+Chill chimes and a custom status-bar icon for USB connect and disconnect events
+on Omarchy (Wayland / Hyprland / Quickshell).
 
-- **plug** (drive connected) → `plug.wav`, icon appears
-- **unmount** (filesystem ejected) → `inject.wav`
-- **unplug** (drive removed) → `unplug.wav`, icon disappears
+- **plug** (USB device connected) → `plug.wav`, icon appears
+- **unmount** (USB filesystem ejected) → `inject.wav`
+- **unplug** (USB device removed) → `unplug.wav`, icon hides when none remain
 
 Detection is fully **user-space** — no root, no `sudo`, no udev rules:
 `udevadm monitor` (USB events) + `gdbus monitor` (UDisks2 `MountPoints`
-changes) run in a normal systemd **user** service. Internal SATA/NVMe drives
-and mice/keyboards are ignored.
+changes) run in a normal systemd **user** service. USB root hubs and interface
+events are ignored; USB peripherals and storage devices are supported.
 
 ## Install
 
@@ -27,26 +27,28 @@ companion pieces needed to actually hear/see events:
 - `~/.config/omarchy/hooks/plug-monitor.sh` — the event daemon
 - `~/.config/systemd/user/sound-on-plug.service` — runs the daemon
 
+The installer copies these companion files; the icon and sounds remain in
+the plugin directory.
+
 ## Usage
 
 | Action | Result |
 |--------|--------|
-| Plug in a USB drive | `plug` chime, 🔌 appears |
+| Plug in a USB device | `plug` chime, custom icon appears |
 | Eject/unmount the drive | `inject` chime |
-| Pull the drive out | `unplug` chime, 🔌 hides |
-| Click icon (left / right / middle) | Preview plug / unplug / unmount |
+| Unplug the device | `unplug` chime; icon hides when none remain |
+| Click icon (left / middle / right) | Preview plug / inject / unplug |
 
-Sounds are intentionally short and soft (the player uses `mpv` at volume 60,
-falling back to `pw-play` or `paplay`).
+Sounds are intentionally short. Playback uses `pw-play` from PipeWire.
 
 ## Verify
 
 ```sh
 systemctl --user status sound-on-plug   # running?
-tail -f ~/.local/state/omarchy/plug-monitor.log
 ```
 
-Expected log lines: `plug: <devpath>`, `unmount: <dev>`, `unplug: <devpath>`.
+The bar icon starts with the current USB-device state and then updates on
+device add/remove events.
 
 ## Uninstall
 
@@ -59,9 +61,8 @@ omarchy plugin remove io.github.bass57.sound-on-plug
 
 - `udevadm` (systemd)
 - `gdbus` (glib2)
-- `stdbuf` (coreutils)
-- `lsblk` (util-linux)
-- a sound player: `mpv`, `pw-play` (pipewire), or `paplay` (pulseaudio)
+- `notify-send` (libnotify)
+- `pw-play` (PipeWire)
 - a systemd user session (`graphical-session.target`)
 
 Regenerating the sounds (all synthesized, no samples):

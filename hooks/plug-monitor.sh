@@ -1,160 +1,157 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -uo pipefail
 
-# User-space daemon: plays a single chime per physical USB action and tracks
-# bar-icon visibility. No root required.
-#   plug    - usb subsystem device attach             -> plug.wav   (+ show icon)
-#   unmount - UDisks2 MountPoints -> empty (USB)      -> inject.wav
-#   unplug  - usb subsystem device detach             -> unplug.wav (- hide icon)
-#
-# Notes:
-#   * udev: only "device level" usb events are used (no root hubs/interface
-#     tails), and only UDEV (post-rules) headers -> KERNEL mirrors ignored.
-#   * udisks2 emits NO Filesystem.Unmounted signal; unmount is detected via
-#     Properties.PropertiesChanged on the Filesystem interface when its
-#     MountPoints array becomes empty (gdbus monitor, standard subscription).
-#   * dbus-monitor is intentionally not used: on some systems it gets
-#     "not authorized to send message" and silently receives nothing.
-#   * A file-based 2s cooldown shared across both watchers guarantees exactly
-#     one sound per physical action (e.g. eject -> inject, then pull -> unplug
-#     is suppressed).
-#
-# Dependencies: udevadm (systemd), gdbus (glib2), stdbuf (coreutils),
-#               lsblk (util-linux), and the sound-on-plug hook.
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy"
+status_file="$state_dir/sound-on-plug-status"
+sound_hook="$HOME/.config/omarchy/hooks/sound-on-plug"
 
-LOG_FILE="$HOME/.local/state/omarchy/plug-monitor.log"
-STATUS_FILE="$HOME/.local/state/omarchy/sound-on-plug-status"
-LAST_FILE="$HOME/.local/state/omarchy/sound-on-plug-last"
-mkdir -p "$(dirname "$LOG_FILE")"
+mkdir -p "$state_dir"
 
-echo "$(date '+%F %T'): plug-monitor starting" >> "$LOG_FILE"
-
-cooldown_ok() {
-  local now last
-  now="$(date +%s)"
-  last="$(cat "$LAST_FILE" 2>/dev/null || echo 0)"
-  if (( now - last < 2 )); then
-    echo "$(date '+%F %T'): cooldown: suppressing sound (event: $1)" >> "$LOG_FILE"
-    return 1
-  fi
-  printf '%s\n' "$now" > "$LAST_FILE"
-  return 0
-}
-
-hook() { "$HOME/.config/omarchy/hooks/sound-on-plug" "$1" >>"$LOG_FILE" 2>&1; }
-
-# --------------------------------------------------------------------------
-# Bar-icon visibility state: the plugin watches this file and hides when it
-# reads "0" (no USB storage connected). plug -> 1, unplug -> 0 (or 1 if
-# another USB storage device is still present).
-# --------------------------------------------------------------------------
-update_status() {
+write_status() {
   local value="$1"
-  printf '%s\n' "$value" > "$STATUS_FILE"
-  echo "$(date '+%F %T'): status -> $value" >> "$LOG_FILE"
+  local temporary_file
+  temporary_file="$(mktemp "$state_dir/sound-on-plug-status.XXXXXX")"
+  printf '%s\n' "$value" > "$temporary_file"
+  mv -f "$temporary_file" "$status_file"
 }
 
-# Bar icon = USB *storage* is physically connected. Mice/keyboards/dongles must
-# not keep the icon alive; only devices exposing a USB block device (usb-storage
-# or uas) do. Re-evaluated from sysfs on every event, so it reflects reality.
-connected_usb_visible() {
-  /usr/bin/lsblk -d -n -o TRAN 2>/dev/null | grep -q '^usb$'
-}
+declare -A connected_devices=()
 
-refresh_status() {
-  if connected_usb_visible; then
-    update_status 1
+set_status_from_events() {
+  if (( ${#connected_devices[@]} > 0 )); then
+    write_status 1
   else
-    update_status 0
+    write_status 0
   fi
 }
 
-# --------------------------------------------------------------------------
-# USB udev watcher -> plug/unplug (device-level events only)
-# --------------------------------------------------------------------------
-# Real udevadm output: `UDEV  [ts] ...` (two spaces) and `KERNEL[ts] ...` (none).
-usb_watch() {
-  stdbuf -oL udevadm monitor --subsystem-match=usb --property | while IFS= read -r line; do
-    if [[ "$line" =~ ^UDEV[[:space:]]*\[ ]]; then
-      current_action=""
-      current_devpath=""
-      active_header=udev
-      continue
-    fi
-    if [[ "$line" =~ ^KERNEL[[:space:]]*\[ ]]; then
-      current_action=""
-      current_devpath=""
-      active_header=skip
-      continue
-    fi
-    [[ "$active_header" == "skip" ]] && continue
-    case "$line" in
-      ACTION=*)  current_action="${line#ACTION=}" ;;
-      DEVPATH=*) current_devpath="${line#DEVPATH=}" ;;
-    esac
-    if [[ -z "$line" && -n "$current_action" ]]; then
-      local devpath="$current_devpath"
-      local action="$current_action"
-      current_action=""
-      current_devpath=""
-      # Device-level only: skip root hubs (.../usbN) and interface tails
-      # (a ':' component right behind the USB node, e.g. .../usb1/1-2:1.0).
-      [[ -z "$devpath" ]] && continue
-      [[ "$devpath" =~ /usb[0-9]+$ ]] && continue
-      local tail="${devpath#*/usb[0-9]}"
-      if [[ "$tail" != "$devpath" && "$tail" == *:* ]]; then continue; fi
-
-      if [[ "$action" == "add" ]]; then
-        if cooldown_ok plug; then hook plug; fi
-        refresh_status
-        echo "$(date '+%F %T'): plug: $devpath" >> "$LOG_FILE"
-      elif [[ "$action" == "remove" ]]; then
-        if cooldown_ok unplug; then hook unplug; fi
-        refresh_status
-        echo "$(date '+%F %T'): unplug: $devpath" >> "$LOG_FILE"
-      fi
-    fi
+initialize_connected_devices() {
+  local vendor_file device_dir device_name
+  shopt -s nullglob
+  for vendor_file in /sys/bus/usb/devices/*/idVendor; do
+    device_dir="${vendor_file%/idVendor}"
+    device_name="${device_dir##*/}"
+    [[ "$device_name" =~ ^[0-9]+-[0-9]+(\.[0-9]+)*$ ]] || continue
+    [[ -r "$device_dir/idProduct" ]] || continue
+    connected_devices["$device_name"]=1
   done
+  set_status_from_events
 }
 
-# --------------------------------------------------------------------------
-# UDisks2 unmount watcher -> inject (Filesystem MountPoints becomes empty)
-# --------------------------------------------------------------------------
-is_usb_block() {
-  local dev="$1"
-  [[ -z "$dev" ]] && return 1
-  local props
-  props="$(udevadm info -q property -n "/dev/$dev" 2>/dev/null)"
-  if [[ -z "$props" ]]; then
-    # Device already gone (e.g. stick pulled during unmount): assume removable.
-    return 0
+handle_event() {
+  local action="$1"
+  local device_path="$2"
+  local model="$3"
+  local sound title body
+
+  case "$action" in
+    add)
+      sound=plug
+      title="USB device connected"
+      ;;
+    remove)
+      sound=unplug
+      title="USB device disconnected"
+      sleep 0.2
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+
+  model="${model//_/ }"
+  body="${model:-${device_path##*/}}"
+
+  if [[ "$action" == add ]]; then
+    connected_devices["${device_path##*/}"]=1
+  else
+    unset "connected_devices[${device_path##*/}]"
   fi
-  grep -q '^ID_BUS=usb' <<<"$props" && return 0
-  grep -q '^ID_USB_DRIVER=' <<<"$props" && return 0
-  return 1
+  set_status_from_events
+
+  if ! "$sound_hook" "$sound"; then
+    printf 'Failed to play USB %s sound for %s\n' "$sound" "$device_path" >&2
+  fi
+  if ! /usr/bin/notify-send --app-name="Omarchy USB" "$title" "$body"; then
+    printf 'Failed to send USB %s notification for %s\n' "$action" "$device_path" >&2
+  fi
 }
-unmount_watch() {
-  gdbus monitor --system --dest org.freedesktop.UDisks2 | while IFS= read -r line; do
-    [[ "$line" != *"org.freedesktop.UDisks2.Filesystem"* ]] && continue
-    [[ "$line" != *"PropertiesChanged"* ]] && continue
-    [[ "$line" != *"MountPoints"* ]] && continue
-    if [[ "$line" == *"'MountPoints': <@aay []>"* || "$line" == *"'MountPoints': <[]>"* ]]; then
-      if [[ "$line" =~ /org/freedesktop/UDisks2/block_devices/([a-zA-Z0-9]+) ]]; then
-        local dev="${BASH_REMATCH[1]}"
-        if is_usb_block "$dev"; then
-          if cooldown_ok inject; then hook inject; fi
-          refresh_status
-          echo "$(date '+%F %T'): unmount: $dev" >> "$LOG_FILE"
-        else
-          echo "$(date '+%F %T'): unmount (non-usb, skipped): $dev" >> "$LOG_FILE"
-        fi
+
+process_record() {
+  [[ -n "$action" && "$device_type" == usb_device && -n "$device_path" ]] || return 0
+  [[ "${device_path##*/}" =~ ^usb[0-9]+$ ]] && return 0
+  handle_event "$action" "$device_path" "${database_model:-$model}"
+}
+
+watch_usb_unmounts() {
+  local line object_path block_name sysfs_path
+
+  while true; do
+    while IFS= read -r line; do
+      [[ "$line" == *"org.freedesktop.DBus.Properties.PropertiesChanged"* ]] || continue
+      [[ "$line" == *"org.freedesktop.UDisks2.Filesystem"* ]] || continue
+      [[ "$line" == *"MountPoints"* && "$line" == *"@aay []"* ]] || continue
+
+      object_path="${line%%:*}"
+      block_name="${object_path##*/}"
+      [[ "$block_name" =~ ^[[:alnum:]_]+$ ]] || continue
+      [[ -e "/sys/class/block/$block_name/device" ]] || continue
+      sysfs_path="$(readlink -f "/sys/class/block/$block_name/device")" || continue
+      [[ "$sysfs_path" =~ /usb[0-9]+/[0-9]+-[0-9]+ ]] || continue
+
+      if ! "$sound_hook" inject; then
+        printf 'Failed to play USB inject sound for %s\n' "$block_name" >&2
       fi
-    fi
+    done < <(/usr/bin/gdbus monitor --system --dest org.freedesktop.UDisks2)
+
+    printf 'UDisks2 monitor exited; retrying in 5 seconds\n' >&2
+    sleep 5
   done
 }
 
-# Initial bar-icon state: USB storage plugged in right now?
-refresh_status
+initialize_connected_devices
 
-usb_watch &
-unmount_watch &
-wait
+action=""
+device_type=""
+device_path=""
+model=""
+database_model=""
+
+watch_usb_unmounts &
+
+while IFS= read -r line; do
+  case "$line" in
+    UDEV\ *)
+      process_record
+      action=""
+      device_type=""
+      device_path=""
+      model=""
+      database_model=""
+      read -r _ _ action device_path _ <<< "$line"
+      ;;
+    ACTION=*)
+      action="${line#ACTION=}"
+      ;;
+    DEVTYPE=*)
+      device_type="${line#DEVTYPE=}"
+      ;;
+    ID_MODEL_FROM_DATABASE=*)
+      database_model="${line#ID_MODEL_FROM_DATABASE=}"
+      ;;
+    ID_MODEL=*)
+      model="${line#ID_MODEL=}"
+      ;;
+    "")
+      process_record
+      action=""
+      device_type=""
+      device_path=""
+      model=""
+      database_model=""
+      ;;
+  esac
+done < <(/usr/bin/udevadm monitor --udev --property --subsystem-match=usb)
+
+printf 'udevadm monitor exited unexpectedly\n' >&2
+exit 1
