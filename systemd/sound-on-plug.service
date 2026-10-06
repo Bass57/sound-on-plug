@@ -1,14 +1,14 @@
 [Unit]
-Description=Play a sound when a USB device is plugged in, unmounted, or unplugged
-PartOf=graphical-session.target
+Description=USB plug and unplug sounds and notifications
 After=graphical-session.target
-ConditionEnvironment=WAYLAND_DISPLAY
+PartOf=graphical-session.target
 
 [Service]
 Type=simple
 ExecStart=%h/.config/omarchy/hooks/plug-monitor.sh
-Restart=always
-RestartSec=5
+Restart=on-failure
+RestartSec=3
+Environment=XDG_RUNTIME_DIR=%t
 
 [Install]
 WantedBy=graphical-session.target

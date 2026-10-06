@@ -9,11 +9,11 @@ BarWidget {
 
   readonly property string home: Quickshell.env("HOME") || ""
   readonly property string hookPath: home + "/.config/omarchy/hooks/sound-on-plug"
-  readonly property string stateFilePath: home + "/.local/state/omarchy/sound-on-plug-status"
+  readonly property string stateHome: Quickshell.env("XDG_STATE_HOME") || (home + "/.local/state")
+  readonly property string stateFilePath: stateHome + "/omarchy/sound-on-plug-status"
 
-  // Hidden while "0": no USB storage connected, or none plugged. The
-  // plug-monitor daemon (./install.sh) rewrites this file on every event.
-  property bool usbPresent: true
+  // The companion monitor updates this file on USB add/remove events.
+  property bool usbPresent: false
 
   visible: root.usbPresent
 
@@ -35,19 +35,29 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: "🔌"
-    fontFamily: ""
-    horizontalMargin: 7.5
-    tooltipText: "Left: plug · Right: unplug · Middle: unmount"
+    text: " "
+    labelVisible: false
+    fixedWidth: 34
+    tooltipText: "Left: plug · Middle: inject · Right: unplug sound preview"
     onPressed: function(button) {
       if (!root.bar || !root.hookPath) return
-      if (button === Qt.RightButton) {
-        root.bar.run("bash \"" + root.hookPath + "\" unplug")
+      if (button === Qt.LeftButton) {
+        root.bar.run("bash \"" + root.hookPath + "\" plug")
       } else if (button === Qt.MiddleButton) {
         root.bar.run("bash \"" + root.hookPath + "\" inject")
-      } else {
-        root.bar.run("bash \"" + root.hookPath + "\" plug")
+      } else if (button === Qt.RightButton) {
+        root.bar.run("bash \"" + root.hookPath + "\" unplug")
       }
+    }
+
+    Image {
+      anchors.centerIn: parent
+      width: 20
+      height: 20
+      source: Qt.resolvedUrl("usb-plug.svg")
+      sourceSize.width: 40
+      sourceSize.height: 40
+      smooth: true
     }
   }
 }
