@@ -3,6 +3,10 @@
 Chill chimes and a custom status-bar icon for USB connect and disconnect events
 on Omarchy (Wayland / Hyprland / Quickshell).
 
+<p align="center">
+  <img src="usb-plug.svg" alt="Custom gradient USB plug icon with a connection spark" width="96">
+</p>
+
 - **plug** (USB device connected) → `plug.wav`, icon appears
 - **unmount** (USB filesystem ejected) → `inject.wav`
 - **unplug** (USB device removed) → `unplug.wav`, icon hides when none remain
